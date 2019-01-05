@@ -1,0 +1,135 @@
+
+import sys
+import random
+import time
+from op_based_2P2P_graph_implementation import Graph
+sys.path.append('../../')
+import controller
+
+config(channel is fifo, clock is lamport)
+
+class Replica(process, controller.Controllee):
+    def setup(ctl, fail_rate:float, s:set):
+        super().setup(ctl)
+        self.crdt =  Graph()        #payload integer i
+
+    def receive(msg=('query_vertex', c,w)):
+        output('Vertex Present: '+str(self.crdt.queryVertex(w)))
+
+    def receive(msg=('query_edge', c,u,v)):
+        output('Edge Present: '+str(self.crdt.queryEdge((u,v))))
+
+   
+    def receive(msg=('update_add_vertex', c, ts, w)): 
+            output('Add vertex: '+str(self)+ "vertex "+ str(w) + ' at time : '+str(ts))
+            if(self.crdt.add_to_queue((c,ts,w,"add_vertex"))):
+                send(('update_add_vertex_downstream', c, ts, w), to=s-{c})
+            else:
+                output('Already received this  update. Not Adding vertex.')
+
+    def receive(msg=('update_add_vertex_downstream', e)):
+            #self.crdt.update_add_downstream(e)
+                self.crdt.addVertex()
+                
+
+    def receive(msg=('update_add_edge', c, ts, u,v)):
+                output('Add edge: '+str(self)+ "edge ("+ str(u) + "," + str(v) + ")" + ' at time : '+str(ts))
+                if(self.crdt.add_to_queue((c,ts,u,v,"add_edge"))):        
+                    send(('update_add_edge_downstream',  c, ts, u,v), to=s-{c})
+                else:
+                    output('Already received this update. Not adding edge.')
+    
+    def receive(msg=('update_add_edge_downstream', e)):
+            #self.crdt.update_add_downstream(e)
+                self.crdt.addEdge()
+     
+    def receive(msg=('remove_vertex', c, ts, w)):
+            output('Remove vertex: '+str(self)+ "vertex "+ str(w) + ' at time : '+str(ts))
+            if(self.crdt.add_to_queue((c,ts,w,"remove_vertex"))):        
+                # PRE-CONDITION
+                send(('update_remove_vertex_downstream',   c, ts, w), to=s-{c})
+                #send(('add_edge',c, ts,u,v), to= s-{c})
+            else:
+                output('Already received this update. Not removing vertex.')
+    
+    def receive(msg=('update_remove_vertex_downstream', e)):
+            #self.crdt.update_add_downstream(e)
+                self.crdt.removeVertex()
+     
+    def receive(msg=('remove_edge', c, ts, u,v)):
+            output('Remove edge: '+str(self)+ "edge ("+ str(u) + "," + str(v) + ")" + ' at time : '+str(ts))
+            if(self.crdt.add_to_queue((c,ts,w,"remove_edge"))):        
+                # PRE-CONDITION
+                self.crdt.removeEdge()
+                send(('remove_edge',c, ts,u,v), to= s-{c})
+            else:
+                output('Already received this update. Not removing edge.')
+
+    @controller.run
+    def run():
+         if (fail_rate >= random.random()):
+            output('Process crashed. Recovering...')
+            time.sleep(5)
+         send(('done',self), to=parent())
+         await(received(('done',), from_=parent()))
+
+def main():
+        nreplicas = int((sys.argv[1]) if len(sys.argv) > 1 else 2)
+        naddedge =  int((sys.argv[2]) if len(sys.argv) > 2 else 1)
+        naddvertex =    int((sys.argv[3]) if len(sys.argv) > 3 else 1)
+        nrmvedge =  int((sys.argv[2]) if len(sys.argv) > 2 else 1)
+        nrmvvertex =    int((sys.argv[3]) if len(sys.argv) > 3 else 1)
+        process_fail_rate = float((sys.argv[4]) if len(sys.argv) > 4 else 0)
+
+        ctl = new(controller.Controller, num= 1)
+        setup(ctl, (nreplicas, ))
+        start(ctl)
+        ps = new(Replica, num=nreplicas)
+
+        vertex = [1,2,3,4,5]
+        edge = [(1,2),(3,2),(4,5),(5,1)]
+        j=0
+        for p in ps: setup(p, (ctl,process_fail_rate, ps-{p},))
+        start(ps)
+
+        for i in range(0,naddvertex+naddedge+nrmvedge+nrmvvertex):
+            r = random.randint(1,nreplicas)
+            op = random.randint(0,3)
+            index = 0
+            replica = None
+            for p in ps:
+                if index == r-1:
+                    replica = p
+                    break
+                else:
+                    index = index+1
+            c = logical_clock()
+            if (naddvertex>0 and op == 0):
+                #output('sending decrement to : '+str(replica) +' at time '+str(c))
+                v = random.randint(1,5)
+                send(('add_vertex',self, c, v), to = replica)
+                j+=1
+                naddvertex = naddvertex-1
+            elif naddedge>0 and op == 1: 
+                #output('sending increment to : '+str(replica)+' at time '+str(c))
+                u = random.randint(1,5)
+                v = random.randint(1,5)
+                send(('add_edge',self, logical_clock(),u,v), to = replica)
+                naddedge = naddedge-1
+
+            elif nrmvvertex>0 and op == 2: 
+                #output('sending increment to : '+str(replica)+' at time '+str(c))
+                u = random.randint(1,5)
+                send(('remove_vertex',self, logical_clock(),u), to = replica)
+                naddedge = naddedge-1
+            else: 
+                #output('sending increment to : '+str(replica)+' at time '+str(c))
+                u = random.randint(1,5)
+                v = random.randint(1,5)
+                send(('remove_edge',self, logical_clock(),u,v), to = replica)
+                naddedge = naddedge-1
+            
+        time.sleep(3)
+        send(('query_edge',self),to=ps)
+        await(each(p in ps, has=received(('done', p))))
+        send(('done',), to=ps)
