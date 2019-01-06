@@ -1,0 +1,100 @@
+import sys
+import random
+import time
+import psutil
+from counter_crdt import Counter
+sys.path.append('../../')
+import controller
+
+config(channel is fifo, clock is lamport)
+
+class Replica(process, controller.Controllee):
+    def setup(ctl, fail_rate:float, s:set,ntasks:int, time_out:int, crash_timer:int):
+        super().setup(ctl)
+        # Counter crdt is the payload
+        self.crdt =  Counter(0)
+        # Count to check for convergence and termination
+        self.count = 0
+
+    # Query method to lookup counter value
+    def receive(msg=('query')):
+        output('Query lookup at replica '+str(self.crdt.value()))
+    
+    # At Source Update Increment method
+    def receive(msg=('update_increment')): 
+            self.crdt.update_increment_atSource()
+            #no precondition in counter for downstream
+            send(('update_increment_downstream'), to=s)
+    
+    # Downstream update Increment operation
+    def receive(msg=('update_increment_downstream')):
+            self.crdt.update_increment_downstream()
+            self.count += 1
+    
+    # At Source Update Decrement method
+    def receive(msg=('update_decrement')):
+            self.crdt.update_decrement_atSource()
+            #no precondition in counter for downstream
+            send(('update_decrement_downstream'), to=s)
+    
+    # Downstream update Decrement operation
+    def receive(msg=('update_decrement_downstream')):
+            self.crdt.update_decrement_downstream()
+            self.count += 1
+
+    @controller.run
+    def run():
+            # Simulate process crash and recovery
+            if (fail_rate >= random.random()):
+                output('Process crashed. Recovering...')
+                time.sleep(crash_timer)
+            # Check if replicas converges within timeout range
+            if await(self.count==ntasks):
+                pass
+            elif timeout(time_out):
+                output('Time out reached before convergence, states across replicas may not be consistent')
+            send(('done',self), to=parent())
+            await(received(('done',), from_=parent()))
+
+def main():
+        # Input parameters
+        nreplicas = int((sys.argv[1]) if len(sys.argv) > 1 else 2)
+        ninc =  int((sys.argv[2]) if len(sys.argv) > 2 else 1)
+        ndec =  int((sys.argv[3]) if len(sys.argv) > 3 else 1)
+        process_fail_rate = float((sys.argv[4]) if len(sys.argv) > 4 else 0)
+        time_out = int((sys.argv[5]) if len(sys.argv) > 5 else 4)
+        crash_timer = int((sys.argv[6]) if len(sys.argv) > 6 else 0)
+        ctl = new(controller.Controller, num= 1)
+        setup(ctl, (nreplicas, ))
+        start(ctl)
+        ps = new(Replica, num=nreplicas)
+
+        for p in ps: setup(p, (ctl,process_fail_rate, ps, ninc+ndec,time_out, crash_timer,))
+        start(ps)
+        # Sending increments/decrements commands to random replicas
+        for i in range(0,ndec+ninc):
+            r = random.randint(1,nreplicas)
+            should_inc = random.randint(0,1)
+            index = 0
+            replica = None
+            for p in ps:
+                if index == r-1:
+                    replica = p
+                    break
+                else:
+                    index = index+1
+            if (ndec>0 and should_inc == 1) or ninc<1:
+                output('sending decrement to : '+str(replica))
+                send(('update_decrement'), to = replica)
+                ndec = ndec-1
+            else: 
+                output('sending increment to : '+str(replica))
+                send(('update_increment'), to = replica)
+                ninc = ninc-1
+        await(each(p in ps, has=received(('done', p))))
+        # Queries the final state of each replica
+        send(('query'),to=ps)
+        # For Memory profiling
+        p = psutil.Process()
+        output(p.as_dict(attrs=['memory_info', 'cpu_percent' ,'pid']))
+        send(('done',), to=ps)
