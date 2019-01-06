@@ -1,5 +1,4 @@
 """
-Created by Md Majid Jahangir
 Implemented Specification 12 State based 2P-Set from A comprehensive study of Convergent and Commutative
 Replicated Data Types -  https://hal.inria.fr/inria-00555588/document 
 """
