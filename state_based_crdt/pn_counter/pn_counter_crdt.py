@@ -1,5 +1,5 @@
 """
-Created by Md Majid Jahangir
+
 Implemented Specification 7 State based PN-Counter from A comprehensive study of Convergent and Commutative
 Replicated Data Types -  https://hal.inria.fr/inria-00555588/document 
 
