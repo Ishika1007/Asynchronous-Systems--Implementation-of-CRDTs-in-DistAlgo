@@ -1,0 +1,110 @@
+import sys
+import random
+import time
+from u_set_crdt import USet
+import psutil
+sys.path.append('../../../')
+import controller
+
+config(channel is fifo, clock is lamport)
+
+class Replica(process, controller.Controllee):
+    def setup(ctl, fail_rate:float, s:set,n:int,time_out:int, crash_timer:int):
+        super().setup(ctl)
+        # CRDT is the payload
+        self.crdt =  USet()  
+        # Count to check for convergence and termination
+        self.count = 0 
+
+    # Query method to lookup element 'e' in Uset of replica
+    def receive(msg=('query', e)):
+        output('Query lookup for element: '+str(e)+' returned '+str(self.crdt.lookup(e)))
+        output('Final state at replica '+str(self.crdt.S))
+    
+    # At Source add element method
+    def receive(msg=('update_add', e)): 
+            pre = self.crdt.update_add_atSource(e)
+            # Check for the pre condition
+            if(pre):
+                # Send update add operation to downstream
+                send(('update_add_downstream', e), to=s)
+    
+    # Downstream update add operation
+    def receive(msg=('update_add_downstream', e)):
+            # Invoke add element method
+            self.crdt.update_add_downstream(e)
+            self.count += 1
+    
+    # At Source remove element method
+    def receive(msg=('update_remove', e)):
+            # Check for the pre condition
+            pre = self.crdt.update_remove_atSource(e)
+            if(pre):
+                # Send update remove operation to downstream
+                send(('update_remove_downstream', e), to=s)
+            self.count += 1
+    
+    # Downstream update remove operation
+    def receive(msg=('update_remove_downstream', e)):
+            self.crdt.update_remove_downstream(e)
+            self.count += 1
+
+    @controller.run
+    def run():
+         # Simulate process crash and recovery
+         if (fail_rate >= random.random()):
+            output('Process crashed. Recovering...')
+            time.sleep(crash_timer)
+          # Check if replicas converges within timeout range
+         if await(self.count==n):
+            pass
+         elif timeout(time_out):
+            output('Time out reached before convergence, states across replicas may not be consistent')
+         send(('done',self), to=parent())
+         await(received(('done',), from_=parent()))
+
+def main():
+        # Input parameters
+        nreplicas = int((sys.argv[1]) if len(sys.argv) > 1 else 2)
+        nadds =  int((sys.argv[2]) if len(sys.argv) > 2 else 5)
+        nrems =  int((sys.argv[3]) if len(sys.argv) > 3 else 5)
+        process_fail_rate = float((sys.argv[4]) if len(sys.argv) > 4 else 0)
+        time_out = int((sys.argv[5]) if len(sys.argv) > 5 else 5)
+        crash_timer = int((sys.argv[6]) if len(sys.argv) > 6 else 0)
+
+        ctl = new(controller.Controller, num= 1)
+        setup(ctl, (nreplicas, ))
+        start(ctl)
+        ps = new(Replica, num=nreplicas)
+        n = nadds+nrems
+        for p in ps: setup(p, (ctl,process_fail_rate, ps,n,time_out,crash_timer,))
+        start(ps)
+        
+        # Sending additions/removals commands to random replicas
+        for i in range(0,n):
+            r = random.randint(1,nreplicas)
+            should_remove = random.randint(0,1)
+            index = 0
+            replica = None
+            for p in ps:
+                if index == r-1:
+                    replica = p
+                    break
+                else:
+                    index = index+1
+            elem = random.randint(0,nadds+nrems)
+            if (nrems>0 and should_remove == 1) or nadds<1:
+                output('removing element : '+str(elem)+' from: ' +str(replica))
+                send(('update_remove',elem), to = replica)
+                nrems = nrems-1
+            else: 
+                output('adding element : '+str(i)+' at: ' +str(replica))
+                send(('update_add',i), to = replica)
+                nadds = nadds-1
+        await(each(p in ps, has=received(('done', p))))
+        # Queries the final state of each replica
+        send(('query', random.randint(0,n)),to=ps)
+        # This is for memory profiling
+        p = psutil.Process()
+        output(p.as_dict(attrs=['memory_info', 'cpu_percent' ,'pid']))
+        send(('done',), to=ps)
