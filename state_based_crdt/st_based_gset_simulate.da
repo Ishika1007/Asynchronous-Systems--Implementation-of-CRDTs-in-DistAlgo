@@ -1,0 +1,92 @@
+import sys
+import random
+import time
+import psutil
+from st_gset_crdt import GSet
+sys.path.append('../../')
+import controller
+config(channel is fifo, clock is lamport)
+
+
+class P(process, controller.Controllee):
+	
+	def setup(ctl, s:set,ntasks:int,fail_rate:float,time_out:int,crash_time:int):
+		super().setup(ctl)
+		# GSet crdt is the payload
+		self.crdt = GSet()
+		# Count to check for convergence and termination
+		self.count = 0
+		
+	# Query method to lookup element 'e' in G-set
+	def receive(msg=('query',e)):
+		output('Query lookup at replica for '+str(e)+': '+str(self.crdt.lookup(e)))
+	
+	# Add element method
+	def receive(msg=('add',e)):
+		self.crdt.add(e)
+		send(('merge',self.crdt), to = s-{self})
+		self.count += 1
+		
+	# Merge operation
+	def receive(msg=('merge',other_crdt)): 
+		self.crdt.payload = GSet.merge(self.crdt,other_crdt)
+		self.count += 1
+	
+	# Compare operation
+	def receive(msg=('compare', other_crdt)):
+		result = GSet.compare(self.crdt,other_crdt)
+		output('Compare result :'+str(result))
+
+	@controller.run
+	def run():
+		prob_rep_fail = random.random()
+		# Simulate process crash and recovery
+		if (prob_rep_fail<=fail_rate):
+			output('Process failed. Recovering...')
+			time.sleep(crash_time)
+		# Check if replicas converges within timeout range
+		if await(self.count==ntasks):
+			pass
+		elif timeout(time_out):
+			output('Time out reached before convergence, states across replicas may not be consistent')
+		send(('done',self), to=parent())
+		await(received(('done',), from_=parent()))
+
+def main():
+	# Input parameters
+	nreplicas = int((sys.argv[1]) if len(sys.argv) > 1 else 2)
+	nadd =  int((sys.argv[2]) if len(sys.argv) > 2 else 1)
+	process_fail_rate = float((sys.argv[3]) if len(sys.argv) > 3 else 0)
+	time_out = int((sys.argv[4]) if len(sys.argv) > 4 else 1)
+	crash_timer = int((sys.argv[5]) if len(sys.argv) > 5 else 0)
+	ctl = new(controller.Controller, num= 1)
+	setup(ctl, (nreplicas, ))
+	start(ctl)
+	ps = new(P, num=nreplicas)
+
+
+	for p in ps: setup(p, (ctl,ps,nadd,process_fail_rate,time_out,crash_timer,))
+	start(ps)
+	
+	# Sending add command to random replicas
+	for i in range(0,nadd):
+		r = random.randint(1,nreplicas)
+		index = 0
+		replica = None
+		for p in ps:
+			if index == r-1:
+				replica = p
+				break
+			else:
+				index = index+1
+		send(('add',i), to = replica)
+
+	await(each(p in ps, has=received(('done', p))))
+
+	for i in range(0,nadd):
+		# Queries the final state of each replica
+		send(('query',i), to = ps)
+	# Memory Profiling
+	p = psutil.Process()
+	output(p.as_dict(attrs=['memory_info', 'cpu_percent' ,'pid']))
+	send(('done',), to=ps)
